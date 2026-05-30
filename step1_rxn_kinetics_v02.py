@@ -26,9 +26,9 @@ dH_p = -100*1000 # 100 kJ/mol = 100,000 J/mol
 Mw_mono = 28.05# g/mol
 
 # Dnesity (rho)
-P_assu = 1000*1E5 # 1000 bar (1E8 Pa) & 600 K
-T_assu = 600
-R_gas = 8.3145
+P_assu = 3000*1E5 # 3000 bar (1E8 Pa) & 150+273 K
+T_assu = 150+273  # K
+R_gas = 8.3145    # J/mol/K
 C_assu = P_assu*R_gas*T_assu # mol/m^3
 rho = Mw_mono*C_assu # g/m^3
 
@@ -99,6 +99,7 @@ def rxn1(y,t,arg_list):
 
     # Energy balance (T)
     dT_dt = (-dH_p)/rho/Cp_ass*kp*mono*lamb0 - 4*U_heat/rho/Cp_ass/D*(T-Tc_const)
+    
     # Overall -> return
     dydt_list = [dlamb0_dt, dlamb1_dt, dlamb2_dt,
                  dmu0_dt, dmu1_dt, dmu2_dt,
