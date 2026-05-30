@@ -8,8 +8,8 @@ from scipy.integrate import odeint
 # %%
 # Defning Key Variables
 # %%
-kd_test = 0.2
-kp_test = 5
+kd_test = 0.4
+kp_test = 6
 ktc_test = 0.01
 ktd_test = 0.01
 ktrm_test = 0.3
@@ -110,7 +110,7 @@ def rxn1(y,t,arg_list):
 # Initial conditions
 # %%
 mono_0 = 10.5 # mol/L at 1000 bar 600 K
-ini_0 = 0.1
+ini_0 = 1.5
 T_0 = 600   # K
 y0 = np.zeros([9,])
 y0[6] = mono_0
@@ -139,16 +139,17 @@ PDI_res = Mw_res/Mn_res
 # %%
 # Graph
 # %%
-plt.figure(figsize=[5/2, 3.8/2], dpi=300)
+plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
 plt.plot(t_ran, Mn_res, 
          label = 'Mn (g/mol)')
-plt.figure(figsize=[5/2, 3.8/2], dpi=300)
+plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
 plt.plot(t_ran, Mw_res, 
          label = 'Mw (g/mol)')
 plt.ylabel('molecular weight (g/mol)')
 plt.legend(fontsize= 9)
 plt.show()
+
 # %%
-plt.plot(t_ran, y_res[:,-2])
-plt.show()
+#plt.plot(t_ran, y_res[:,-2])
+#plt.show()
 # %%
