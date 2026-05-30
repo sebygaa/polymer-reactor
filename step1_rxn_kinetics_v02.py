@@ -31,7 +31,7 @@ Mw_mono = 28.05# g/mol
 P_assu = 3000*1E5 # 3000 bar (1E8 Pa) & 150+273 K
 T_assu = 150+273  # K
 R_gas = 8.3145    # J/mol/K
-C_assu = P_assu*R_gas*T_assu # mol/m^3
+C_assu = P_assu/R_gas/T_assu # mol/m^3
 rho = Mw_mono*C_assu # g/m^3
 print('rho =')
 print(rho)
