@@ -8,22 +8,42 @@ from scipy.integrate import odeint
 # %%
 # Defning Key Variables
 # %%
-kd_test = 3
-kp_test = 100
-ktc_test = 0.2
-ktd_test = 0.2
-ktrm_test = 5
-ktrp_test = 0.2
+kd_test = 0.2
+kp_test = 5
+ktc_test = 0.01
+ktd_test = 0.01
+ktrm_test = 0.3
+ktrp_test = 0.02
 # kp >> ktrm > kd >> ktc, ktd, ktrp 순서여야함
 f_test = 0.8 # Initiator efficiency (80% assumed)
 
 par_list = [kd_test, kp_test, ktc_test, ktd_test, 
             ktrm_test, ktrp_test, f_test,]
-            
 
+   
+Tc_const = 40+273 # K
+dH_p = -100*1000 # 100 kJ/mol = 100,000 J/mol
+Mw_mono = 28.05# g/mol
+
+# Dnesity (rho)
+P_assu = 1000*1E5 # 1000 bar (1E8 Pa) & 600 K
+T_assu = 600
+R_gas = 8.3145
+C_assu = P_assu*R_gas*T_assu # mol/m^3
+rho = Mw_mono*C_assu # g/m^3
+
+# Heat capacity Cp
+Cp_C2 = 42.9  # J/mol/K
+Cp_ass = Cp_C2/Mw_mono  # J/g/K
+
+# Overall heat transfer coefficients (U)
+U_heat = 200    # J/s/m^2/K
+
+# Diameter
+D = 0.10       # 10 cm = 0.10 m 
 # %%
 # Form of ODE equations
-#mu3 = 200
+
 def rxn1(y,t,arg_list):
     lamb0 = y[0]
     lamb1 = y[1]
@@ -33,6 +53,7 @@ def rxn1(y,t,arg_list):
     mu2 = y[5]
     ini = y[6]
     mono = y[7]
+    T = y[8]
     kd, kp, ktc, ktd, ktrm, ktrp, f = arg_list
 
     # mu3 from Schulz-Zimm distribution (gamma distribution assumptio)
@@ -76,22 +97,27 @@ def rxn1(y,t,arg_list):
     dmu2_dt = term4_1 +term4_2+term4_3
     dmu2_dt += ktrp*(mu1*lamb2 - lamb0*mu3)
 
+    # Energy balance (T)
+    dT_dt = (-dH_p)/rho/Cp_ass*kp*mono*lamb0 - 4*U_heat/rho/Cp_ass/D*(T-Tc_const)
+    # Overall -> return
     dydt_list = [dlamb0_dt, dlamb1_dt, dlamb2_dt,
                  dmu0_dt, dmu1_dt, dmu2_dt,
-                 dini_dt, dmono_dt]
+                 dini_dt, dmono_dt, dT_dt]
     dy_dt = np.array(dydt_list)
     return dy_dt
 
 # %%
 # Initial conditions
 # %%
-mono_0 = 0.30 # mol/L at 20 bar 800 K
-ini_0 = 0.01
-y0 = np.zeros([8,])
-y0[-1] = mono_0
-y0[-2] = ini_0
+mono_0 = 10.5 # mol/L at 1000 bar 600 K
+ini_0 = 0.1
+T_0 = 600   # K
+y0 = np.zeros([9,])
+y0[6] = mono_0
+y0[7] = ini_0
+y0[8] = T_0
 # %%
-t_ran = np.arange(0,15.01, 0.02)
+t_ran = np.arange(0,10.01, 0.02)
 y_res = odeint(rxn1,y0,t_ran, args = (par_list,),)
 
 # %%
@@ -105,21 +131,24 @@ mu1_res = y_res[:,4]
 mu2_res = y_res[:,5]
 ini_res = y_res[:,6]
 mono_res = y_res[:,7]
+T_res = y_res[:,8]
 
-Mw_mono = 28.05# g/mol
 Mn_res = Mw_mono*(lamb1_res+mu1_res)/(lamb0_res+mu0_res)
 Mw_res = Mw_mono*(lamb2_res+mu2_res)/(lamb1_res+mu1_res)
 PDI_res = Mw_res/Mn_res
 # %%
 # Graph
 # %%
-plt.figure(figsize=[5, 3.8], dpi=300)
+plt.figure(figsize=[5/2, 3.8/2], dpi=300)
 plt.plot(t_ran, Mn_res, 
          label = 'Mn (g/mol)')
+plt.figure(figsize=[5/2, 3.8/2], dpi=300)
 plt.plot(t_ran, Mw_res, 
          label = 'Mw (g/mol)')
 plt.ylabel('molecular weight (g/mol)')
-plt.legend(fontsize= 13)
+plt.legend(fontsize= 9)
+plt.show()
 # %%
 plt.plot(t_ran, y_res[:,-2])
+plt.show()
 # %%
