@@ -21,7 +21,7 @@ par_list = [kd_test, kp_test, ktc_test, ktd_test,
             ktrm_test, ktrp_test, f_test,]
 
    
-Tc_const = 40+273 # K
+Tc_const = 200+273 # K
 dH_p = -100*1000 # 100 kJ/mol = 100,000 J/mol
 Mw_mono = 28.05# g/mol
 
@@ -99,7 +99,7 @@ def rxn1(y,t,arg_list):
 
     # Energy balance (T)
     dT_dt = (-dH_p)/rho/Cp_ass*kp*mono*lamb0 - 4*U_heat/rho/Cp_ass/D*(T-Tc_const)
-    
+
     # Overall -> return
     dydt_list = [dlamb0_dt, dlamb1_dt, dlamb2_dt,
                  dmu0_dt, dmu1_dt, dmu2_dt,
