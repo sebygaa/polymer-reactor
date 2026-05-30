@@ -12,9 +12,11 @@ kd_test = 0.8
 kp_test = 15
 ktc_test = 0.02
 ktd_test = 0.02
-ktrm_test = 0.6
-ktrp_test = 0.04
+ktrm_test = 15E-3
+ktrp_test = 10E-3
 # kp >> ktrm > kd >> ktc, ktd, ktrp 순서여야함
+# 만약 kp = 5이고 ktrm = ktrp = 1 m³/(mol·s) = 1000 L/(mol·s) 이라면 비현실적...
+# → kp와 같은 수준으로 너무 높음 (실제로는 kp의 1/1000 ~ 1/100 수준)
 f_test = 0.8 # Initiator efficiency (80% assumed)
 
 par_list = [kd_test, kp_test, ktc_test, ktd_test, 
@@ -31,16 +33,18 @@ T_assu = 150+273  # K
 R_gas = 8.3145    # J/mol/K
 C_assu = P_assu*R_gas*T_assu # mol/m^3
 rho = Mw_mono*C_assu # g/m^3
+print('rho =')
+print(rho)
 
 # Heat capacity Cp
 Cp_C2 = 42.9  # J/mol/K
 Cp_ass = Cp_C2/Mw_mono  # J/g/K
 
 # Overall heat transfer coefficients (U)
-U_heat = 2000    # J/s/m^2/K
+U_heat = 400    # J/s/m^2/K
 
 # Diameter
-D = 0.10       # 10 cm = 0.10 m 
+D = 0.05       # 10 cm = 0.10 m 
 # %%
 # Form of ODE equations
 
@@ -111,14 +115,14 @@ def rxn1(y,t,arg_list):
 # Initial conditions
 # %%
 mono_0 = 2.005E4 # mol/L at 1000 bar 600 K
-ini_0 = 0.2
-T_0 = 600   # K
+ini_0 = 100.0
+T_0 = 150+273   # K
 y0 = np.zeros([9,])
 y0[6] = mono_0
 y0[7] = ini_0
 y0[8] = T_0
 # %%
-t_ran = np.arange(0,10.01, 0.02)
+t_ran = np.arange(0,20.01, 0.02)
 y_res = odeint(rxn1,y0,t_ran, args = (par_list,),)
 
 # %%
@@ -154,7 +158,7 @@ plt.legend(fontsize= 9)
 plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
 plt.plot(t_ran, T_res, 
          label = 'T (K)')
-plt.ylabel('molecular weight (g/mol)')
+plt.ylabel('temperature (K)')
 plt.legend(fontsize= 9)
 
 plt.show()
