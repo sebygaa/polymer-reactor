@@ -8,12 +8,12 @@ from scipy.integrate import odeint
 # %%
 # Defning Key Variables
 # %%
-kd_test = 0.4
-kp_test = 6
-ktc_test = 0.01
-ktd_test = 0.01
-ktrm_test = 0.3
-ktrp_test = 0.02
+kd_test = 0.8
+kp_test = 15
+ktc_test = 0.02
+ktd_test = 0.02
+ktrm_test = 0.6
+ktrp_test = 0.04
 # kp >> ktrm > kd >> ktc, ktd, ktrp 순서여야함
 f_test = 0.8 # Initiator efficiency (80% assumed)
 
@@ -37,7 +37,7 @@ Cp_C2 = 42.9  # J/mol/K
 Cp_ass = Cp_C2/Mw_mono  # J/g/K
 
 # Overall heat transfer coefficients (U)
-U_heat = 200    # J/s/m^2/K
+U_heat = 2000    # J/s/m^2/K
 
 # Diameter
 D = 0.10       # 10 cm = 0.10 m 
@@ -95,7 +95,7 @@ def rxn1(y,t,arg_list):
     term4_2 = ktd*lamb0*lamb2
     term4_3 = ktc*(lamb0*lamb2+lamb1**2)
     dmu2_dt = term4_1 +term4_2+term4_3
-    dmu2_dt += ktrp*(mu1*lamb2 - lamb0*mu3)
+    dmu2_dt += ktrp*(lamb2*mu1 - lamb0*mu3)
 
     # Energy balance (T)
     dT_dt = (-dH_p)/rho/Cp_ass*kp*mono*lamb0 - 4*U_heat/rho/Cp_ass/D*(T-Tc_const)
@@ -109,8 +109,8 @@ def rxn1(y,t,arg_list):
 # %%
 # Initial conditions
 # %%
-mono_0 = 10.5 # mol/L at 1000 bar 600 K
-ini_0 = 1.5
+mono_0 = 2.005E4 # mol/L at 1000 bar 600 K
+ini_0 = 0.2
 T_0 = 600   # K
 y0 = np.zeros([9,])
 y0[6] = mono_0
@@ -142,11 +142,20 @@ PDI_res = Mw_res/Mn_res
 plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
 plt.plot(t_ran, Mn_res, 
          label = 'Mn (g/mol)')
+plt.legend(fontsize= 9)
+
 plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
 plt.plot(t_ran, Mw_res, 
          label = 'Mw (g/mol)')
 plt.ylabel('molecular weight (g/mol)')
 plt.legend(fontsize= 9)
+
+plt.figure(figsize=[5/1.6, 3.8/1.6], dpi=300)
+plt.plot(t_ran, T_res, 
+         label = 'T (K)')
+plt.ylabel('molecular weight (g/mol)')
+plt.legend(fontsize= 9)
+
 plt.show()
 
 # %%
