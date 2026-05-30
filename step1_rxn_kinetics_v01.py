@@ -33,7 +33,6 @@ def rxn1(y,t,arg_list):
     mu2 = y[5]
     ini = y[6]
     mono = y[7]
-    print(arg_list)
     kd, kp, ktc, ktd, ktrm, ktrp, f = arg_list
 
     # mu3 from Schulz-Zimm distribution (gamma distribution assumptio)
