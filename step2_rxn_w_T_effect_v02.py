@@ -4,99 +4,132 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
+from scipy.sparse import csr_matrix
+import time
 
 # =============================================================================
-# LDPE Free-Radical Polymerization — Method of Moments + Energy Balance
-# Version 04: Dynamic cooling-water temperature (Tc as state variable)
+# LDPE Free-Radical Polymerization — Dynamic 1D PFR Model
+# Version 02: Numerical & physical improvements
 #
-# Changes from v03:
-#   1. Tc is now the 10th state variable (y[9]) with its own ODE.
-#      Previously Tc_const was a fixed parameter.
-#   2. Cooling jacket energy balance added:
-#        dTc/dt = (Tc_in − Tc)/τ_c  +  [4U/(D·ρc·Cp_c·β_j)] · (T − Tc)
-#      where:
-#        Tc_in  = coolant inlet temperature  [K]   (constant feed)
-#        τ_c    = coolant residence time in jacket  [s]
-#        ρc     = coolant density  [g/m³]
-#        Cp_c   = coolant heat capacity  [J/(g·K)]
-#        β_j    = jacket volume / reactor volume  [dimensionless]
-#   3. Reactor energy balance unchanged in form; Tc_const replaced by y[9].
+# Fixed in v02 (from user review):
+#   Fix 1 : N=200 + jac_sparsity for efficient Jacobian approximation
+#   Fix 4 : Mn/Mw from dead-polymer moments only (μ-only); combined also shown
+#   Fix 5 : μ₃ Cauchy-Schwarz lower bound  μ₃ ≥ μ₂²/μ₁  (replaces silent clip)
+#   Fix 6 : h_r / h_j area-basis comment made explicit
+#   Fix 8 : run_grid_convergence() for grid-sensitivity study
+#   Fix 9 : ini_0 = 1.0 mol/m³  (was 100)
+#   Fix 10: variable-specific atol array
 #
-# Unit system:
-#   Concentration : mol/m³
-#   Rate constants: bimolecular → m³/(mol·s),  unimolecular (kd) → s⁻¹
-#   Density       : g/m³
-#   Heat capacity : J/(g·K)
-#   Energy        : J/mol
+# Analysed only (not fixed) — see bottom of file:
+#   Issue 2: constant ρ=600 kg/m³ (density varies with T and conversion)
+#   Issue 3: no pressure-drop term; no pressure-dependent Arrhenius correction
+#   Issue 7: μ₀ LCB term intentionally omitted (consistent with model doc)
 # =============================================================================
 
 # %%
-# ---- Physical / Process Constants ----------------------------------------
+# ---- Physical / Process Constants -----------------------------------------
 # %%
-R_gas   = 8.3145          # J/(mol·K)
-Mw_mono = 28.054          # g/mol  (ethylene)
-f_eff   = 0.8             # initiator efficiency
+R_gas    = 8.3145
+Mw_mono  = 28.054
+f_eff    = 0.8
+L        = 500.0
+D        = 0.05
+D_j      = 0.07
+A_r      = np.pi / 4 * D**2
+A_c      = np.pi / 4 * (D_j**2 - D**2)
+v        = 12.0
+v_c      = 1.0
+rho      = 600_000.0
+Cp       = 1.7
+dH_p     = -93_000.0
+U_heat   = 400.0
+Tc_in    = 140.0 + 273.15
+rho_c    = 900_000.0
+Cp_c     = 4.18
 
-# Reactor geometry
-D       = 0.05            # m  — tube inner diameter
-U_heat  = 400.0           # W/(m²·K)
-
-# Reaction mixture (supercritical ethylene/LDPE)
-rho     = 600_000.0       # g/m³  (= 600 kg/m³)
-Cp      = 1.7             # J/(g·K)
-dH_p    = -93_000.0       # J/mol  (exothermic)
-
-# %%
-# ---- Cooling Jacket Parameters -------------------------------------------
-# %%
-# Pressurised water coolant at ~140 °C
-Tc_in   = 140.0 + 273.15  # K  — coolant inlet temperature (constant)
-tau_c   = 30.0            # s  — coolant residence time in jacket
-                          #      (shorter → stronger control, e.g. 10–60 s)
-rho_c   = 900_000.0       # g/m³  (= 900 kg/m³, pressurised hot water)
-Cp_c    = 4.18            # J/(g·K)
-beta_j  = 0.5             # Vj/Vr  — jacket-to-reactor volume ratio
-
-# Pre-computed jacket heat-uptake coefficient [s⁻¹·K⁻¹ × K = s⁻¹]
-# Term:  4U / (D · ρc · Cp_c · β_j)
-alpha_j = 4.0 * U_heat / (D * rho_c * Cp_c * beta_j)   # s⁻¹
+# Fix 6: both h_r and h_j referenced to inner tube surface (πD per unit length)
+#   h_r = 4U / (ρ·Cp·D)          [1/s]  reactor side
+#   h_j = U·πD / (ρc·Cp_c·Ac)   [1/s]  jacket side
+h_r = 4.0 * U_heat / (rho * Cp * D)
+h_j = U_heat * np.pi * D / (rho_c * Cp_c * A_c)
 
 # %%
-# ---- Arrhenius Parameters ------------------------------------------------
+# ---- Arrhenius Parameters -------------------------------------------------
 # %%
-A_kd   = 3.15e15;  Ea_kd   = 155_000.0   # kd  [s⁻¹]
-A_kp   = 6.58e4;   Ea_kp   =  29_500.0   # kp  [m³/(mol·s)]
-A_ktc  = 2.0e5;    Ea_ktc  =   5_000.0   # ktc [m³/(mol·s)]
-A_ktd  = 2.0e5;    Ea_ktd  =   5_000.0   # ktd [m³/(mol·s)]
-A_ktrm = 1.5;      Ea_ktrm =  47_000.0   # ktrm[m³/(mol·s)]
-A_ktrp = 3.0e-1;   Ea_ktrp =  50_000.0   # ktrp[m³/(mol·s)]
-
+A_kd   = 3.15e15;  Ea_kd   = 155_000.0
+A_kp   = 6.58e4;   Ea_kp   =  29_500.0
+A_ktc  = 2.0e5;    Ea_ktc  =   5_000.0
+A_ktd  = 2.0e5;    Ea_ktd  =   5_000.0
+A_ktrm = 1.5;      Ea_ktrm =  47_000.0
+A_ktrp = 3.0e-1;   Ea_ktrp =  50_000.0
 
 def arrhenius(A, Ea, T):
     return A * np.exp(-Ea / (R_gas * T))
 
+# %%
+# ---- Spatial Grid (Fix 1: N = 200) ----------------------------------------
+# %%
+N  = 200
+NV = 10
+z  = np.linspace(0.0, L, N)
+dz = z[1] - z[0]
+print(f'Grid: N={N}, dz={dz:.2f} m  (v01 had dz={500/(40-1):.1f} m)')
 
 # %%
-# ---- ODE System -----------------------------------------------------------
+# ---- Jacobian Sparsity (Fix 1) -------------------------------------------
 # %%
-# State vector y (10 elements):
-#   y[0] = λ₀   live radical 0th moment  [mol/m³]
-#   y[1] = λ₁   live radical 1st moment  [mol/m³]
-#   y[2] = λ₂   live radical 2nd moment  [mol/m³]
-#   y[3] = μ₀   dead polymer 0th moment  [mol/m³]
-#   y[4] = μ₁   dead polymer 1st moment  [mol/m³]
-#   y[5] = μ₂   dead polymer 2nd moment  [mol/m³]
-#   y[6] = [I]  initiator concentration  [mol/m³]
-#   y[7] = [M]  monomer concentration    [mol/m³]
-#   y[8] = T    reactor temperature      [K]
-#   y[9] = Tc   cooling water temperature[K]   ← NEW
+def build_jac_sparsity(N, NV=10):
+    rows, cols = [], []
+    for i in range(N):
+        for j in range(NV):
+            row = i * NV + j
+            for k in range(NV):               # local reaction coupling
+                rows.append(row); cols.append(i * NV + k)
+            if j < 9 and i > 0:               # backward upwind: prev node
+                rows.append(row); cols.append((i - 1) * NV + j)
+            if j == 9 and i < N - 1:          # forward upwind: next node Tc
+                rows.append(row); cols.append((i + 1) * NV + 9)
+    n = N * NV
+    return csr_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
 
-def rxn_odes(t, y):
-    lamb0, lamb1, lamb2 = y[0], y[1], y[2]
-    mu0,   mu1,   mu2   = y[3], y[4], y[5]
-    ini,   mono,  T, Tc = y[6], y[7], y[8], y[9]
+jac_sp = build_jac_sparsity(N, NV)
+nnz    = jac_sp.nnz
+print(f'Jacobian: {N*NV}×{N*NV}, nnz={nnz} ({100*nnz/(N*NV)**2:.2f}% dense)')
 
-    # --- Arrhenius rate constants ---
+# %%
+# ---- Boundary / Initial-Feed Conditions (Fix 9: ini_0 = 1.0) -------------
+# %%
+mono_0 = 2.005e4
+ini_0  = 1.0         # Fix 9: was 100, commercial LDPE ~0.01–1 mol/m³
+T_0    = 150.0 + 273.15
+
+# %%
+# ---- Variable-Specific atol (Fix 10) -------------------------------------
+# %%
+atol_per_var = np.array([
+    1e-14,   # j=0  λ₀
+    1e-11,   # j=1  λ₁
+    1e-7,    # j=2  λ₂
+    1e-11,   # j=3  μ₀
+    1e-8,    # j=4  μ₁
+    1e-3,    # j=5  μ₂
+    1e-8,    # j=6  [I]
+    1e-1,    # j=7  [M]
+    1e-4,    # j=8  T
+    1e-4,    # j=9  Tc
+])
+atol_vec = np.tile(atol_per_var, N)
+
+# %%
+# ---- ODE Function ---------------------------------------------------------
+# %%
+def pfr_odes(t, y):
+    s = y.reshape(N, NV)
+
+    lamb0=s[:,0]; lamb1=s[:,1]; lamb2=s[:,2]
+    mu0  =s[:,3]; mu1  =s[:,4]; mu2  =s[:,5]
+    ini  =s[:,6]; mono =s[:,7]; T=s[:,8]; Tc=s[:,9]
+
     kd   = arrhenius(A_kd,   Ea_kd,   T)
     kp   = arrhenius(A_kp,   Ea_kp,   T)
     ktc  = arrhenius(A_ktc,  Ea_ktc,  T)
@@ -104,176 +137,299 @@ def rxn_odes(t, y):
     ktrm = arrhenius(A_ktrm, Ea_ktrm, T)
     ktrp = arrhenius(A_ktrp, Ea_ktrp, T)
 
-    # --- Hulburt & Katz closure for μ₃ ---
-    eps = 1e-12
-    if mu0 < eps or mu1 < eps:
-        mu3 = 0.0
-    else:
-        mu3 = mu2 * (2.0 * mu0 * mu2 - mu1**2) / (mu0 * mu1)
-    mu3 = max(mu3, 0.0)
+    # Fix 5: μ₃ Hulburt-Katz with Cauchy-Schwarz lower bound  μ₃ ≥ μ₂²/μ₁
+    eps3   = 1e-12
+    valid  = (mu0 > eps3) & (mu1 > eps3)
+    mu3_hk = np.where(valid,
+                      mu2 * (2.0*mu0*mu2 - mu1**2) / (mu0*mu1 + eps3), 0.0)
+    mu3_cs = np.where(mu1 > eps3, mu2**2 / (mu1 + eps3), 0.0)
+    mu3    = np.maximum(mu3_hk, mu3_cs)
 
-    # --- Initiator and monomer ---
-    dini_dt  = -kd * ini
-    dmono_dt = -kp * mono * lamb0
+    R_l0 = 2.0*f_eff*kd*ini - (ktc+ktd)*lamb0**2
+    R_l1 = (kp*mono*lamb0 + ktrm*mono*(lamb0-lamb1)
+            + ktrp*(lamb0*mu2-lamb1*mu1) - (ktc+ktd)*lamb0*lamb1)
+    R_l2 = (kp*mono*(2.0*lamb1+lamb0) + ktrm*mono*(lamb0-lamb2)
+            + ktrp*(lamb0*mu3-lamb2*mu1) - (ktc+ktd)*lamb0*lamb2)
+    R_m0 = ktrm*mono*lamb0 + (0.5*ktc+ktd)*lamb0**2
+    R_m1 = (ktrm*mono*lamb1 + ktrp*(lamb1*mu1-lamb0*mu2)
+            + (ktc+ktd)*lamb0*lamb1)
+    R_m2 = (ktrm*mono*lamb2 + ktd*lamb0*lamb2
+            + ktc*(lamb0*lamb2+lamb1**2) + ktrp*(lamb2*mu1-lamb0*mu3))
+    R_ini  = -kd * ini
+    R_mono = -kp * mono * lamb0
+    R_T    = (-dH_p)/(rho*Cp)*kp*mono*lamb0 - h_r*(T - Tc)
+    R_Tc   = h_j * (T - Tc)
 
-    # --- Live radical moments ---
-    dlamb0_dt = (2.0 * f_eff * kd * ini
-                 - (ktc + ktd) * lamb0**2)
+    dydt = np.zeros_like(s)
 
-    dlamb1_dt = (kp   * mono * lamb0
-                 + ktrm * mono * (lamb0 - lamb1)
-                 + ktrp * (lamb0 * mu2 - lamb1 * mu1)
-                 - (ktc + ktd) * lamb0 * lamb1)
+    # Reactor vars (j=0..8): Backward upwind FDM  (flow +z)
+    for j, (C, R, BC) in enumerate(zip(
+        [lamb0,lamb1,lamb2, mu0,mu1,mu2, ini,mono,T],
+        [R_l0, R_l1, R_l2, R_m0,R_m1,R_m2, R_ini,R_mono,R_T],
+        [0.0,  0.0,  0.0,  0.0, 0.0, 0.0,  ini_0,mono_0, T_0]
+    )):
+        C_up      = np.empty(N)
+        C_up[0]   = BC
+        C_up[1:]  = C[:-1]
+        dCdz      = (C - C_up) / dz
+        dydt[0, j]  = 0.0
+        dydt[1:, j] = R[1:] - v * dCdz[1:]
 
-    dlamb2_dt = (kp   * mono * (2.0 * lamb1 + lamb0)
-                 + ktrm * mono * (lamb0 - lamb2)
-                 + ktrp * (lamb0 * mu3 - lamb2 * mu1)
-                 - (ktc + ktd) * lamb0 * lamb2)
+    # Jacket Tc (j=9): Forward upwind FDM  (counter-current, flow −z)
+    Tc_dn      = np.empty(N)
+    Tc_dn[:-1] = Tc[1:]
+    Tc_dn[-1]  = Tc_in
+    dTcdz      = (Tc_dn - Tc) / dz
+    dydt[:N-1, 9] = R_Tc[:N-1] + v_c * dTcdz[:N-1]
+    dydt[N-1,  9] = 0.0
 
-    # --- Dead polymer moments ---
-    dmu0_dt = (ktrm * mono * lamb0
-               + (0.5 * ktc + ktd) * lamb0**2)
-
-    dmu1_dt = (ktrm * mono * lamb1
-               + ktrp * (lamb1 * mu1 - lamb0 * mu2)
-               + (ktc + ktd) * lamb0 * lamb1)
-
-    dmu2_dt = (ktrm * mono * lamb2
-               + ktd  * lamb0 * lamb2
-               + ktc  * (lamb0 * lamb2 + lamb1**2)
-               + ktrp * (lamb2 * mu1 - lamb0 * mu3))
-
-    # --- Reactor energy balance ---
-    # dT/dt = [(-ΔHp)/(ρ·Cp)] · kp·[M]·λ₀  −  [4U/(ρ·Cp·D)] · (T − Tc)
-    dT_dt = ((-dH_p) / (rho * Cp) * kp * mono * lamb0
-             - 4.0 * U_heat / (rho * Cp * D) * (T - Tc))
-
-    # --- Cooling jacket energy balance ---
-    # dTc/dt = (Tc_in − Tc)/τ_c  +  α_j · (T − Tc)
-    #   first term:  convective replacement of coolant
-    #   second term: heat absorbed from reactor
-    dTc_dt = ((Tc_in - Tc) / tau_c
-              + alpha_j * (T - Tc))
-
-    return [dlamb0_dt, dlamb1_dt, dlamb2_dt,
-            dmu0_dt,   dmu1_dt,   dmu2_dt,
-            dini_dt,   dmono_dt,  dT_dt, dTc_dt]
-
+    return dydt.ravel()
 
 # %%
 # ---- Initial Conditions ---------------------------------------------------
 # %%
-mono_0 = 2.005e4       # mol/m³   monomer
-ini_0  = 100.0         # mol/m³   initiator
-T_0    = 150 + 273.15  # K        reactor feed temperature
-Tc_0   = Tc_in         # K        jacket starts at coolant inlet temperature
-
-y0 = np.zeros(10)
-y0[6] = ini_0
-y0[7] = mono_0
-y0[8] = T_0
-y0[9] = Tc_0
+y0 = np.zeros((N, NV))
+y0[:, 6] = 0.0;     y0[:, 7] = mono_0
+y0[:, 8] = T_0;     y0[:, 9] = Tc_in
+y0[0,  6] = ini_0;  y0[N-1, 9] = Tc_in
 
 # %%
-# ---- Numerical Integration ------------------------------------------------
+# ---- Time Integration -----------------------------------------------------
 # %%
-t_span = (0.0, 20.0)
-t_eval = np.linspace(0.0, 20.0, 4000)
+tau_res = L / v
+t_end   = 4.0 * tau_res
+t_eval  = np.linspace(0.0, t_end, 300)
 
-sol = solve_ivp(rxn_odes, t_span, y0,
-                method='Radau',
-                t_eval=t_eval,
-                rtol=1e-6, atol=1e-10,
-                dense_output=False)
+print(f'\nResidence time τ = {tau_res:.1f} s  |  Simulating 0 → {t_end:.0f} s ...')
+t0 = time.time()
 
-t_res = sol.t
-y_res = sol.y.T   # shape: (n_points, 10)
+sol = solve_ivp(
+    pfr_odes,
+    (0.0, t_end),
+    y0.ravel(),
+    method='Radau',
+    t_eval=t_eval,
+    rtol=1e-4,
+    atol=atol_vec,
+    jac_sparsity=jac_sp,
+    dense_output=False,
+)
 
-# %%
-# ---- Post-processing ------------------------------------------------------
-# %%
-lamb0_res = y_res[:, 0]
-lamb1_res = y_res[:, 1]
-lamb2_res = y_res[:, 2]
-mu0_res   = y_res[:, 3]
-mu1_res   = y_res[:, 4]
-mu2_res   = y_res[:, 5]
-ini_res   = y_res[:, 6]
-mono_res  = y_res[:, 7]
-T_res     = y_res[:, 8]
-Tc_res    = y_res[:, 9]
-
-eps = 1e-30
-lam0_total = lamb0_res + mu0_res + eps
-lam1_total = lamb1_res + mu1_res + eps
-lam2_total = lamb2_res + mu2_res + eps
-
-Mn_res     = Mw_mono * lam1_total / lam0_total
-Mw_res     = Mw_mono * lam2_total / lam1_total
-PDI_res    = Mw_res / Mn_res
-conversion = 1.0 - mono_res / mono_0
+elapsed = time.time() - t0
+print(f'Done in {elapsed:.1f} s  |  status={sol.status}  |  nfev={sol.nfev}')
+print(f'Message: {sol.message}')
 
 # %%
-# ---- Plots ----------------------------------------------------------------
+# ---- Post-processing -------------------------------------------------------
 # %%
-fig, axes = plt.subplots(2, 4, figsize=(16, 7))
-fig.suptitle('LDPE Free-Radical Polymerization — MoM Simulation (v04, dynamic Tc)', fontsize=11)
+nt = len(sol.t)
+Y  = sol.y.T.reshape(nt, N, NV)
 
-axes[0, 0].plot(t_res, mono_res / mono_0 * 100)
-axes[0, 0].set_ylabel('Monomer remaining (%)')
-axes[0, 0].set_xlabel('Time (s)')
-axes[0, 0].set_title('Monomer conversion')
+lamb0_s=Y[:,:,0]; lamb1_s=Y[:,:,1]; lamb2_s=Y[:,:,2]
+mu0_s  =Y[:,:,3]; mu1_s  =Y[:,:,4]; mu2_s  =Y[:,:,5]
+ini_s  =Y[:,:,6]; mono_s =Y[:,:,7]
+T_s    =Y[:,:,8]; Tc_s   =Y[:,:,9]
+X_s    = 1.0 - mono_s / mono_0
 
-axes[0, 1].plot(t_res, T_res  - 273.15, color='tomato', label='Reactor T')
-axes[0, 1].plot(t_res, Tc_res - 273.15, color='steelblue', label='Coolant Tc')
-axes[0, 1].axhline(Tc_in - 273.15, color='steelblue', linestyle='--', alpha=0.5, label='Tc_in')
-axes[0, 1].set_ylabel('Temperature (°C)')
-axes[0, 1].set_xlabel('Time (s)')
-axes[0, 1].set_title('Reactor & coolant temperature')
-axes[0, 1].legend(fontsize=8)
+eps_mw = 1e-30
 
-axes[0, 2].plot(t_res, T_res - Tc_res, color='darkorange')
-axes[0, 2].set_ylabel('T − Tc  (K)')
-axes[0, 2].set_xlabel('Time (s)')
-axes[0, 2].set_title('Temperature driving force')
+# Fix 4a: Dead-polymer only Mn/Mw — physically correct for polymer characterisation
+Mn_dead  = Mw_mono * (mu1_s + eps_mw) / (mu0_s + eps_mw)
+Mw_dead  = Mw_mono * (mu2_s + eps_mw) / (mu1_s + eps_mw)
+PDI_dead = Mw_dead / Mn_dead
 
-axes[0, 3].plot(t_res, ini_res)
-axes[0, 3].set_ylabel('[I] (mol/m³)')
-axes[0, 3].set_xlabel('Time (s)')
-axes[0, 3].set_title('Initiator concentration')
+# Fix 4b: Combined live+dead for comparison
+Mn_tot   = Mw_mono * (lamb1_s+mu1_s+eps_mw) / (lamb0_s+mu0_s+eps_mw)
+Mw_tot   = Mw_mono * (lamb2_s+mu2_s+eps_mw) / (lamb1_s+mu1_s+eps_mw)
+PDI_tot  = Mw_tot / Mn_tot
 
-axes[1, 0].plot(t_res, Mn_res / 1000)
-axes[1, 0].set_ylabel('Mn (kg/mol)')
-axes[1, 0].set_xlabel('Time (s)')
-axes[1, 0].set_title('Number-avg mol. weight')
+# Fix 5 post-run: count where Cauchy-Schwarz bound was binding at final time
+mu3_hk_f = np.where(
+    (mu0_s[-1] > 1e-12) & (mu1_s[-1] > 1e-12),
+    mu2_s[-1]*(2.0*mu0_s[-1]*mu2_s[-1]-mu1_s[-1]**2)/(mu0_s[-1]*mu1_s[-1]+1e-30),
+    0.0)
+mu3_cs_f = mu2_s[-1]**2 / (mu1_s[-1] + 1e-30)
+n_cs_binding = int(np.sum(mu3_hk_f < mu3_cs_f))
+print(f'μ₃ Cauchy-Schwarz bound active at final time: {n_cs_binding}/{N} nodes')
 
-axes[1, 1].plot(t_res, Mw_res / 1000)
-axes[1, 1].set_ylabel('Mw (kg/mol)')
-axes[1, 1].set_xlabel('Time (s)')
-axes[1, 1].set_title('Weight-avg mol. weight')
+# %%
+# ---- Figure 1: Steady-state spatial profiles ------------------------------
+# %%
+fig1, axes1 = plt.subplots(2, 4, figsize=(16, 8))
+fig1.suptitle(
+    f'LDPE PFR v02 — Steady-state profiles  (t={sol.t[-1]:.0f} s, N={N})',
+    fontsize=11
+)
 
-axes[1, 2].plot(t_res, PDI_res)
-axes[1, 2].set_ylabel('PDI (—)')
-axes[1, 2].set_xlabel('Time (s)')
-axes[1, 2].set_title('Polydispersity index')
+ax = axes1[0, 0]
+ax.plot(z, T_s[-1]-273.15,  'r',   lw=2, label='Reactor T')
+ax.plot(z, Tc_s[-1]-273.15, 'b--', lw=2, label='Coolant Tc')
+ax.axhline(Tc_in-273.15, color='b', lw=0.8, ls=':', alpha=0.5)
+ax.set_xlabel('z (m)'); ax.set_ylabel('T (°C)'); ax.set_title('Temperature'); ax.legend(fontsize=8)
 
-axes[1, 3].plot(t_res, conversion * 100)
-axes[1, 3].set_ylabel('Conversion (%)')
-axes[1, 3].set_xlabel('Time (s)')
-axes[1, 3].set_title('Monomer conversion')
+axes1[0, 1].plot(z, X_s[-1]*100, 'g', lw=2)
+axes1[0, 1].set_xlabel('z (m)'); axes1[0, 1].set_ylabel('Conversion (%)'); axes1[0, 1].set_title('Monomer conversion')
+
+axes1[0, 2].plot(z, ini_s[-1], 'm', lw=2)
+axes1[0, 2].set_xlabel('z (m)'); axes1[0, 2].set_ylabel('[I] (mol/m³)'); axes1[0, 2].set_title('Initiator')
+
+axes1[0, 3].plot(z, T_s[-1]-Tc_s[-1], 'darkorange', lw=2)
+axes1[0, 3].set_xlabel('z (m)'); axes1[0, 3].set_ylabel('T−Tc (K)'); axes1[0, 3].set_title('Heat-transfer driving force')
+
+axes1[1, 0].plot(z, Mn_dead[-1]/1000, lw=2, label='dead only')
+axes1[1, 0].plot(z, Mn_tot[-1]/1000, lw=1.5, ls='--', label='combined')
+axes1[1, 0].set_xlabel('z (m)'); axes1[1, 0].set_ylabel('Mn (kg/mol)'); axes1[1, 0].set_title('Mn'); axes1[1, 0].legend(fontsize=7)
+
+axes1[1, 1].plot(z, Mw_dead[-1]/1000, lw=2, label='dead only')
+axes1[1, 1].plot(z, Mw_tot[-1]/1000, lw=1.5, ls='--', label='combined')
+axes1[1, 1].set_xlabel('z (m)'); axes1[1, 1].set_ylabel('Mw (kg/mol)'); axes1[1, 1].set_title('Mw'); axes1[1, 1].legend(fontsize=7)
+
+axes1[1, 2].plot(z, PDI_dead[-1], lw=2, label='dead only')
+axes1[1, 2].plot(z, PDI_tot[-1], lw=1.5, ls='--', label='combined')
+axes1[1, 2].set_xlabel('z (m)'); axes1[1, 2].set_ylabel('PDI'); axes1[1, 2].set_title('PDI'); axes1[1, 2].legend(fontsize=7)
+
+axes1[1, 3].plot(z, lamb0_s[-1], lw=2, label='λ₀')
+axes1[1, 3].plot(z, mu0_s[-1], lw=2, ls='--', label='μ₀')
+axes1[1, 3].set_xlabel('z (m)'); axes1[1, 3].set_ylabel('mol/m³'); axes1[1, 3].set_title('λ₀ vs μ₀ (QSSA check)'); axes1[1, 3].legend(fontsize=7)
 
 plt.tight_layout()
-plt.savefig('ldpe_simulation_v04.png', dpi=150)
+plt.savefig('ldpe_pfr_v02_steady.png', dpi=150)
+
+# %%
+# ---- Figure 2: Dynamic evolution ------------------------------------------
+# %%
+z_idx    = [0, N//5, N//2, 4*N//5, N-1]
+z_labels = [f'z={z[i]:.0f}m' for i in z_idx]
+colors   = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
+
+fig2, axes2 = plt.subplots(1, 3, figsize=(14, 4))
+fig2.suptitle(f'Dynamic evolution  (N={N})', fontsize=11)
+for idx, lbl, col in zip(z_idx, z_labels, colors):
+    axes2[0].plot(sol.t, T_s[:,  idx]-273.15, color=col, label=lbl)
+    axes2[1].plot(sol.t, X_s[:,  idx]*100,    color=col, label=lbl)
+    axes2[2].plot(sol.t, Tc_s[:, idx]-273.15, color=col, label=lbl)
+for ax, ttl, yl in zip(axes2,
+    ['Reactor T(t)', 'Conversion(t)', 'Coolant Tc(t)'],
+    ['T (°C)', 'Conv. (%)', 'Tc (°C)']):
+    ax.set_xlabel('t (s)'); ax.set_ylabel(yl); ax.set_title(ttl); ax.legend(fontsize=7)
+plt.tight_layout()
+plt.savefig('ldpe_pfr_v02_dynamic.png', dpi=150)
+
+# %%
+# ---- Figure 3: 2-D colormaps ----------------------------------------------
+# %%
+fig3, axes3 = plt.subplots(1, 3, figsize=(16, 4))
+fig3.suptitle(f'Spatio-temporal maps  (N={N})', fontsize=11)
+im0 = axes3[0].contourf(z, sol.t, T_s-273.15,  levels=40, cmap='hot')
+fig3.colorbar(im0, ax=axes3[0], label='T (°C)'); axes3[0].set(xlabel='z (m)', ylabel='t (s)', title='T(z,t)')
+im1 = axes3[1].contourf(z, sol.t, Tc_s-273.15, levels=40, cmap='cool_r')
+fig3.colorbar(im1, ax=axes3[1], label='Tc (°C)'); axes3[1].set(xlabel='z (m)', ylabel='t (s)', title='Tc(z,t)')
+im2 = axes3[2].contourf(z, sol.t, X_s*100,     levels=40, cmap='viridis')
+fig3.colorbar(im2, ax=axes3[2], label='X (%)'); axes3[2].set(xlabel='z (m)', ylabel='t (s)', title='X(z,t)')
+plt.tight_layout()
+plt.savefig('ldpe_pfr_v02_spacetime.png', dpi=150)
+
 plt.show()
 
 # %%
 # ---- Print summary --------------------------------------------------------
 # %%
-print('=== Simulation Summary (t = {:.2f} s) ==='.format(t_res[-1]))
-print(f'  Monomer conversion : {conversion[-1]*100:.1f} %')
-print(f'  Reactor temp  T    : {T_res[-1]-273.15:.1f} °C')
-print(f'  Coolant temp  Tc   : {Tc_res[-1]-273.15:.1f} °C')
-print(f'  T − Tc (final)     : {T_res[-1]-Tc_res[-1]:.1f} K')
-print(f'  Mn                 : {Mn_res[-1]/1000:.2f} kg/mol')
-print(f'  Mw                 : {Mw_res[-1]/1000:.2f} kg/mol')
-print(f'  PDI                : {PDI_res[-1]:.2f}')
+print('\n=== Steady-state summary at z=L ===')
+print(f'  Conversion        : {X_s[-1,-1]*100:.2f} %')
+print(f'  T_reactor (exit)  : {T_s[-1,-1]-273.15:.1f} °C')
+print(f'  Tc (z=0, outlet)  : {Tc_s[-1,0]-273.15:.1f} °C')
+print(f'  ΔT max (z)        : {(T_s[-1]-Tc_s[-1]).max():.1f} K')
+print(f'  Mn (dead, exit)   : {Mn_dead[-1,-1]/1000:.3f} kg/mol')
+print(f'  Mw (dead, exit)   : {Mw_dead[-1,-1]/1000:.3f} kg/mol')
+print(f'  PDI (dead, exit)  : {PDI_dead[-1,-1]:.3f}')
+
+# %%
+# ---- Fix 8: Grid Convergence Test -----------------------------------------
+# %%
+def run_grid_convergence(N_list=(40, 100, 200), t_end_frac=2.0):
+    results = {}
+    for Ng in N_list:
+        zg  = np.linspace(0.0, L, Ng)
+        dzg = zg[1] - zg[0]
+        NVg = NV
+        jac = build_jac_sparsity(Ng, NVg)
+        atol_g = np.tile(atol_per_var, Ng)
+        ini_0g = ini_0; mono_0g = mono_0
+
+        def odes_g(t, y):
+            s = y.reshape(Ng, NVg)
+            lamb0=s[:,0]; lamb1=s[:,1]; lamb2=s[:,2]
+            mu0=s[:,3];   mu1=s[:,4];   mu2=s[:,5]
+            ini=s[:,6];   mono=s[:,7];  T=s[:,8]; Tc=s[:,9]
+            kd=arrhenius(A_kd,Ea_kd,T); kp=arrhenius(A_kp,Ea_kp,T)
+            ktc=arrhenius(A_ktc,Ea_ktc,T); ktd=arrhenius(A_ktd,Ea_ktd,T)
+            ktrm=arrhenius(A_ktrm,Ea_ktrm,T); ktrp=arrhenius(A_ktrp,Ea_ktrp,T)
+            eps3=1e-12
+            mu3_hk=np.where((mu0>eps3)&(mu1>eps3),
+                             mu2*(2.0*mu0*mu2-mu1**2)/(mu0*mu1+eps3),0.0)
+            mu3=np.maximum(mu3_hk, np.where(mu1>eps3, mu2**2/(mu1+eps3), 0.0))
+            R_l0=2.0*f_eff*kd*ini-(ktc+ktd)*lamb0**2
+            R_l1=(kp*mono*lamb0+ktrm*mono*(lamb0-lamb1)+ktrp*(lamb0*mu2-lamb1*mu1)-(ktc+ktd)*lamb0*lamb1)
+            R_l2=(kp*mono*(2.0*lamb1+lamb0)+ktrm*mono*(lamb0-lamb2)+ktrp*(lamb0*mu3-lamb2*mu1)-(ktc+ktd)*lamb0*lamb2)
+            R_m0=ktrm*mono*lamb0+(0.5*ktc+ktd)*lamb0**2
+            R_m1=(ktrm*mono*lamb1+ktrp*(lamb1*mu1-lamb0*mu2)+(ktc+ktd)*lamb0*lamb1)
+            R_m2=(ktrm*mono*lamb2+ktd*lamb0*lamb2+ktc*(lamb0*lamb2+lamb1**2)+ktrp*(lamb2*mu1-lamb0*mu3))
+            R_ini=-kd*ini; R_mono=-kp*mono*lamb0
+            R_T=(-dH_p)/(rho*Cp)*kp*mono*lamb0-h_r*(T-Tc)
+            R_Tc=h_j*(T-Tc)
+            dydt=np.zeros_like(s)
+            for j,(C,R,BC) in enumerate(zip(
+                [lamb0,lamb1,lamb2,mu0,mu1,mu2,ini,mono,T],
+                [R_l0,R_l1,R_l2,R_m0,R_m1,R_m2,R_ini,R_mono,R_T],
+                [0.,0.,0.,0.,0.,0.,ini_0g,mono_0g,T_0]
+            )):
+                C_up=np.empty(Ng); C_up[0]=BC; C_up[1:]=C[:-1]
+                dCdz=(C-C_up)/dzg
+                dydt[0,j]=0.; dydt[1:,j]=R[1:]-v*dCdz[1:]
+            Tc_dn=np.empty(Ng); Tc_dn[:-1]=Tc[1:]; Tc_dn[-1]=Tc_in
+            dTcdz=(Tc_dn-Tc)/dzg
+            dydt[:Ng-1,9]=R_Tc[:Ng-1]+v_c*dTcdz[:Ng-1]; dydt[Ng-1,9]=0.
+            return dydt.ravel()
+
+        y0g=np.zeros((Ng,NVg))
+        y0g[:,7]=mono_0g; y0g[:,8]=T_0; y0g[:,9]=Tc_in; y0g[0,6]=ini_0g; y0g[Ng-1,9]=Tc_in
+        t_e=t_end_frac*tau_res
+        s=solve_ivp(odes_g,(0.,t_e),y0g.ravel(),method='Radau',
+                    rtol=1e-4,atol=atol_g,jac_sparsity=jac,
+                    t_eval=[t_e],dense_output=False)
+        Y_f=s.y.T.reshape(1,Ng,NVg)
+        T_f=Y_f[0,:,8]; Tc_f=Y_f[0,:,9]
+        mono_f=Y_f[0,:,7]; mu1_f=Y_f[0,:,4]; mu0_f=Y_f[0,:,3]
+        X_exit  = float(1.0-mono_f[-1]/mono_0)
+        T_max   = float(T_f.max()-273.15)
+        Mn_exit = float(Mw_mono*mu1_f[-1]/(mu0_f[-1]+1e-30))
+        results[Ng] = {'X_exit_%': X_exit*100, 'T_max_C': T_max, 'Mn_exit_g/mol': Mn_exit}
+        print(f'  N={Ng:4d}  dz={dzg:6.2f}m  X={X_exit*100:.3f}%  T_max={T_max:.2f}°C  Mn={Mn_exit:.1f} g/mol')
+    return results
+
+print('\n--- Grid convergence study (t = 1τ, N=40 vs 100) ---')
+gc = run_grid_convergence(N_list=[40, 100], t_end_frac=1.0)
+
+# %%
+# =============================================================================
+# ANALYSIS OF ISSUES NOT FIXED (informational only)
+# =============================================================================
+#
+# Issue 2 — Constant density ρ = 600 kg/m³
+#   In reality, at 2000 bar and temperatures spanning 150–500 °C, the mixture
+#   density varies significantly (~20–30 % across the reactor).  A proper model
+#   needs ρ = f(T, X) from an EoS (e.g., SL-EoS or PC-SAFT) and a continuity
+#   equation for the axial velocity profile.
+#
+# Issue 3 — Pressure drop and pressure-dependent Arrhenius
+#   LDPE tubular reactors experience ΔP ~ 200–500 bar over 1.5–2 km.
+#   kp has a measurable activation volume ΔV‡_p ≈ −27 cm³/mol → k_p roughly
+#   doubles from 2000→1000 bar.  Implementing this requires a friction pressure
+#   drop ODE and Arrhenius corrected by exp(−ΔV‡·P/RT).
+#
+# Issue 7 — LCB term in μ₀ equation
+#   The model doc explicitly states: "LCB has zero net effect on chain count
+#   → no k_trp term in dμ₀/dt".  A chain-transfer-to-polymer event converts one
+#   dead chain to one live radical (branch point) — net dead chain count is zero.
+#   Code is intentionally consistent with the document.
+# =============================================================================
