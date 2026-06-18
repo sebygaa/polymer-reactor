@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 N = 20
 P = np.linspace(N, 1, N)
 P = np.ones([N, ])
+P[9]=4
 # print(P)
 P_vec = P.reshape(-1, 1)          # (N, 1) column vector
 print(P_vec)
@@ -31,6 +32,8 @@ too_high = k_tc * PP_mat[overflow].sum()
 valid = lower & (s + 2 <= N)
 bins = (s[valid] + 1)             # target indices into D
 weights = k_tc * PP_mat[valid]
+print('weight=')
+print(weights)
 
 D = np.bincount(bins, weights=weights, minlength=N)[:N]
 
