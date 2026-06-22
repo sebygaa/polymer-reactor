@@ -27,7 +27,7 @@ k_trp = 1E-3
 k_tc = 1.0E-3
 k_td = 1.0E-3
 
-N_max = 900
+N_max = 1200
 mat_min_1 = np.diag(np.ones([N_max-1]),-1)
 #print(mat_min_1) 
 mat_N = np.arange(1,N_max+0.1)
@@ -72,8 +72,8 @@ def model(y,t):
     dydt = np.concatenate([[dIdt, dMdt,], dPdt, dDdt])
     return dydt
 
-I0 = 1E-1
-M0 = 100
+I0 = 5E-2
+M0 = 200
 y0 = np.zeros([2*N_max+2,])
 y0[0] = I0
 y0[1] = M0
