@@ -21,7 +21,7 @@ def build_termination_operator(N, k_tc=1.0):
     return sp.csr_matrix((data, (rows, cols)), shape=(N, N * N))
 
 k_d = 1.0E1
-k_p = 5E-1
+k_p = 2E0
 k_trm = 8E-3
 k_trp = 1E-3
 k_tc = 1.0E-3
@@ -73,7 +73,7 @@ def model(y,t):
     return dydt
 
 I0 = 5E-2
-M0 = 150
+M0 = 180
 y0 = np.zeros([2*N_max+2,])
 y0[0] = I0
 y0[1] = M0
