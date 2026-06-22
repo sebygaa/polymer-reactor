@@ -98,6 +98,7 @@ plt.xlabel('Chain Length')
 plt.ylabel('Active Polymer Concen. (mol/m$^{3}$)')
 plt.legend()
 plt.tight_layout()
+plt.savefig('Fig1_ActivePoly.png', dpi=300)
 #plt.show()
 
 print('D_list = ', len(D_list))
@@ -110,6 +111,7 @@ plt.xlabel('Chain Length')
 plt.ylabel('Dead Polymer Concen. (mol/m$^{3}$)')
 plt.legend()
 plt.tight_layout()
+plt.savefig('Fig2_DeadPoly.png',dpi=300)
 
 # Overall polymer
 P_res_mat = np.matrix(P_list)
@@ -125,7 +127,8 @@ plt.xlabel('Chain Length')
 plt.ylabel('Polymer Concen. (mol/m$^{3}$)')
 plt.legend()
 plt.tight_layout()
-plt.show()
+plt.savefig('Fig3_AllPoly.png',dpi=300)
+#plt.show()
 
 
 
